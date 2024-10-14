@@ -5,12 +5,32 @@ use std::collections::BinaryHeap;
 use std::vec::Vec;
 
 const NODATA: u8 = 255;
+const RADIUS: f64 = 6371000.0;
 
 #[pymodule]
 fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
 
+    fn ij2lonlat(i: usize, j: usize, aff: ArrayView1<'_, f64>) -> (f64, f64) {
+        (
+            (j as f64 * aff[0] + i as f64 * aff[1] + aff[2]).to_radians(),
+            (j as f64 * aff[3] + i as f64 * aff[4] + aff[5]).to_radians()
+        )
+    }
+
+    fn earth_dist_vincenty(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> u32 {
+        let x = lat1.sin() * lat2.sin() + lat1.cos() * lat2.cos() * (lon2 - lon1).cos();
+        let y1 = (lat2.cos() * (lon2 - lon1).sin()).powf(2.0);
+        let y2 = (lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * (lon2 - lon1).cos()).powf(2.0);
+        return (RADIUS * (y1 + y2).sqrt().atan2(x)) as u32
+    }
+
+    fn earth_dist(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> u32 {
+        let sigma = lat1.sin() * lat2.sin() + lat1.cos() * lat2.cos() * (lon2-lon1).cos();
+        return (RADIUS * sigma.acos()) as u32
+    }
+
     // compute drainage tree
-    fn d8tree(acc: ArrayView2<'_, u32>, dir: ArrayView2<'_, u8>) -> (Array2<u32>, Array2<u32>)  {
+    fn d8tree(acc: ArrayView2<'_, u32>, dir: ArrayView2<'_, u8>, aff: ArrayView1<'_, f64>,) -> (Array2<u32>, Array2<u32>)  {
 
         let dj = [1, 1, 0, -1, -1, -1,  0,  1]; // columns
         let di = [0, 1, 1,  1,  0, -1, -1, -1]; // rows
@@ -45,8 +65,6 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
             }
         }
 
-        println!("Queue initialized");
-
         let mut id = 0_u32;
         let mut amax = 0_u32;
         let (mut i, mut j): (usize, usize);
@@ -59,6 +77,8 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
                 i = istart;
                 j = jstart;
                 res[[i, j]] = id;
+
+                let mut length = 0_u32;
 
                 while acc[[i, j]] > 0 {
                     amax = 0;
@@ -92,20 +112,24 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
                     
                     if (i == imax) && (j == jmax) { break; }
 
+                    let (lon1, lat1) = ij2lonlat(i, j, aff);
+                    let (lon2, lat2) = ij2lonlat(imax, jmax, aff);
+                    length += earth_dist(lon1, lat1, lon2, lat2);
+
                     i = imax;
                     j = jmax;
                     res[[i, j]] = id;
 
                     if dir[[i, j]] == 0 { break; }
                 }
-                let seed = vec![i as u32, j as u32, istart as u32, jstart as u32, a];
+                let seed = vec![i as u32, j as u32, istart as u32, jstart as u32, a, length];
                 seeds.push(seed);
             }
         }
 
-        let mut pyseeds = Array2::zeros([seeds.len(), 5]);
+        let mut pyseeds = Array2::zeros([seeds.len(), 6]);
         for i in 0..seeds.len() {
-            for j in 0..5 {
+            for j in 0..6 {
                 pyseeds[[i, j]] = seeds[i][j];
             }
         }
@@ -116,7 +140,7 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
 
     fn d8comp(acc1: ArrayView2<'_, u32>, dir1: ArrayView2<'_, u8>, dir2: ArrayView2<'_, u8>,
               aff1: ArrayView1<'_, f64>, aff2: ArrayView1<'_, f64>) -> Array2<u8> {
-
+ 
         let shape1 = dir1.raw_dim();
         let res = Array2::zeros(shape1);
 
@@ -193,12 +217,13 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     fn d8tree_py<'py>(
         py: Python<'py>,
         acc: PyReadonlyArray2<'py, u32>,
-        dir: PyReadonlyArray2<'py, u8>
+        dir: PyReadonlyArray2<'py, u8>,
+        aff: PyReadonlyArray1<'py, f64>
     ) -> (Bound<'py, PyArray2<u32>>, Bound<'py, PyArray2<u32>>) {
-        println!("HELL YELL");
         let acc = acc.as_array();
         let dir = dir.as_array();
-        let (res, pyseeds) = d8tree(acc, dir);
+        let aff = aff.as_array();
+        let (res, pyseeds) = d8tree(acc, dir, aff);
         (res.into_pyarray_bound(py), pyseeds.into_pyarray_bound(py))
     }
 
