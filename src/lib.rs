@@ -1,7 +1,8 @@
-use numpy::ndarray::{Array2, ArrayView1, ArrayView2};
-use numpy::{IntoPyArray, PyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
+use numpy::ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
 use pyo3::{pymodule, types::PyModule, PyResult, Python, Bound};
 use std::collections::BinaryHeap;
+use std::collections::HashSet;
 use std::vec::Vec;
 
 const NODATA: u8 = 255;
@@ -79,6 +80,7 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
                 res[[i, j]] = id;
 
                 let mut length = 0_u32;
+                let mut ncells = 1_u32;
 
                 while acc[[i, j]] > 0 {
                     amax = 0;
@@ -114,7 +116,8 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
 
                     let (lon1, lat1) = ij2lonlat(i, j, aff);
                     let (lon2, lat2) = ij2lonlat(imax, jmax, aff);
-                    length += earth_dist(lon1, lat1, lon2, lat2);
+                    length += earth_dist_vincenty(lon1, lat1, lon2, lat2);
+                    ncells += 1;
 
                     i = imax;
                     j = jmax;
@@ -122,14 +125,14 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
 
                     if dir[[i, j]] == 0 { break; }
                 }
-                let seed = vec![i as u32, j as u32, istart as u32, jstart as u32, a, length];
+                let seed = vec![i as u32, j as u32, istart as u32, jstart as u32, ncells, a, length];
                 seeds.push(seed);
             }
         }
 
-        let mut pyseeds = Array2::zeros([seeds.len(), 6]);
+        let mut pyseeds = Array2::zeros([seeds.len(), 7]);
         for i in 0..seeds.len() {
-            for j in 0..6 {
+            for j in 0..7 {
                 pyseeds[[i, j]] = seeds[i][j];
             }
         }
@@ -138,56 +141,89 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
 
     }
 
-    fn d8comp(acc1: ArrayView2<'_, u32>, dir1: ArrayView2<'_, u8>, dir2: ArrayView2<'_, u8>,
-              aff1: ArrayView1<'_, f64>, aff2: ArrayView1<'_, f64>) -> Array2<u8> {
+    fn d8comp(dir1: ArrayView2<'_, u8>, dir2: ArrayView2<'_, u8>, seeds: ArrayView2<'_, u32>) -> Array1<f64> {
  
         let shape1 = dir1.raw_dim();
-        let res = Array2::zeros(shape1);
-
         let nrow1 = shape1[0];
         let ncol1 = shape1[1];
 
+        let shape2 = dir2.raw_dim();
+        let nrow2 = shape2[0];
+        let ncol2 = shape2[1];
 
-        let dx = [1, 1, 1, 0, -1, -1, -1, 0];
-        let dy = [-1, 0, 1, 1, 1, 0, -1, -1];
-        let mut pntr_matches: [usize; 129] = [0usize; 129];
+        let ratio = nrow1 / nrow2;
+
+        let dj = [1, 1, 0, -1, -1, -1,  0,  1]; // columns
+        let di = [0, 1, 1,  1,  0, -1, -1, -1]; // rows
+        let mut idx: [usize; 129] = [0usize; 129];
 
         // This maps Esri-style D8 pointer values
         // onto the cell offsets in d_x and d_y.
-        pntr_matches[1] = 1usize;
-        pntr_matches[2] = 2usize;
-        pntr_matches[4] = 3usize;
-        pntr_matches[8] = 4usize;
-        pntr_matches[16] = 5usize;
-        pntr_matches[32] = 6usize;
-        pntr_matches[64] = 7usize;
-        pntr_matches[128] = 0usize;
+        idx[1] = 0usize;
+        idx[2] = 1usize;
+        idx[4] = 2usize;
+        idx[8] = 3usize;
+        idx[16] = 4usize;
+        idx[32] = 5usize;
+        idx[64] = 6usize;
+        idx[128] = 7usize;
 
-        let (mut x, mut y): (usize, usize);
+        let (mut i, mut j): (usize, usize);
         let mut flag: bool;
         let mut dir: u8;
 
-        // for row in 0..nrow1 {
-        //     for col in 0..ncol1 {
-        //         if dir1[[row, col]] != NODATA {
-        //             flag = false;
-        //             x = col;
-        //             y = row;
-        //             while !flag {
-        //                 // find its downslope neighbour
-        //                 dir = dir1[[y, x]];
-        //                 if dir != NODATA && dir > 0 {
-        //                     // move x and y accordingly
-        //                     x += dx[pntr_matches[dir]];
-        //                     y += dy[pntr_matches[dir]];
-        //                 } else {
-        //                     flag = true;
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
+        let shape_seeds = seeds.raw_dim();
+        let nseeds = shape_seeds[0];
+        let mut res = Array1::zeros(nseeds);
 
+        for k in 0..nseeds {
+            let i1 = seeds[[k, 0]] as usize;
+            let j1 = seeds[[k, 1]] as usize;
+
+            let i2 = seeds[[k, 2]] as usize;
+            let j2 = seeds[[k, 3]] as usize;
+
+            // Trace the flowline from generalized cell
+
+            let istart = i1 / ratio;
+            let jstart = j1 / ratio;
+
+            flag = false;
+            i = istart;
+            j = jstart;
+
+            let mut dir2cells: HashSet<(usize, usize)> = HashSet::new();
+            dir2cells.insert((i / ratio, j / ratio));
+
+            while !flag {
+                // find its downslope neighbour
+                dir = dir2[[i, j]];
+                if dir != NODATA && dir > 0 {
+                    // move x and y accordingly
+                    i = (i as isize + di[idx[dir as usize]]) as usize;
+                    j = (j as isize + dj[idx[dir as usize]]) as usize;
+                    dir2cells.insert((i, j));
+                } else {
+                    flag = true;
+                }
+            }
+            
+            i = i1;
+            j = j1;
+
+            let mut total = 1;
+            let mut inter = 1;
+
+            while i != i2 || j != j2 {
+                dir = dir1[[i, j]];
+                i = (i as isize + di[idx[dir as usize]]) as usize;
+                j = (j as isize + dj[idx[dir as usize]]) as usize;
+                total += 1;
+                inter += if dir2cells.contains(&(i / ratio, j / ratio)) { 1 } else { 0 };
+            }
+            res[k] = inter as f64 / total as f64;
+
+        }
         return res
     }
 
@@ -196,18 +232,14 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     #[pyo3(name = "d8comp")]
     fn d8comp_py<'py>(
         py: Python<'py>,
-        acc1: PyReadonlyArray2<'py, u32>,
         dir1: PyReadonlyArray2<'py, u8>,
         dir2: PyReadonlyArray2<'py, u8>,
-        aff1: PyReadonlyArray1<'py, f64>,
-        aff2: PyReadonlyArray1<'py, f64>,
-    ) -> Bound<'py, PyArray2<u8>> {
-        let acc1 = acc1.as_array();
+        seeds: PyReadonlyArray2<'py, u32>,
+    ) -> Bound<'py, PyArray1<f64>> {
         let dir1 = dir1.as_array();
         let dir2 = dir2.as_array();
-        let aff1 = aff1.as_array();
-        let aff2 = aff2.as_array();
-        let res = d8comp(acc1, dir1, dir2, aff1, aff2);
+        let seeds = seeds.as_array();
+        let res = d8comp(dir1, dir2, seeds);
         res.into_pyarray_bound(py)
     }
 
