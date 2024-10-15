@@ -182,48 +182,119 @@ fn fdcomp<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
 
             let i2 = seeds[[k, 2]] as usize;
             let j2 = seeds[[k, 3]] as usize;
-
-            // Trace the flowline from generalized cell
-
-            let istart = i1 / ratio;
-            let jstart = j1 / ratio;
-
-            flag = false;
-            i = istart;
-            j = jstart;
-
-            let mut dir2cells: HashSet<(usize, usize)> = HashSet::new();
-            dir2cells.insert((i / ratio, j / ratio));
-
-            while !flag {
-                // find its downslope neighbour
-                dir = dir2[[i, j]];
-                if dir != NODATA && dir > 0 {
-                    // move x and y accordingly
-                    i = (i as isize + di[idx[dir as usize]]) as usize;
-                    j = (j as isize + dj[idx[dir as usize]]) as usize;
-                    dir2cells.insert((i, j));
-                } else {
-                    flag = true;
-                }
-            }
             
             i = i1;
             j = j1;
 
-            let mut total = 1;
-            let mut inter = 1;
+            let mut dir2cells: Vec<(usize, usize)> = Vec::new();
+            let mut dir2nums: Vec<usize> = Vec::new();
+
+            let mut icur = i / ratio;
+            let mut jcur = j / ratio;
+            let mut ncur = 1_usize;
+
+            let mut igen = icur;
+            let mut jgen = jcur;
 
             while i != i2 || j != j2 {
                 dir = dir1[[i, j]];
                 i = (i as isize + di[idx[dir as usize]]) as usize;
                 j = (j as isize + dj[idx[dir as usize]]) as usize;
-                total += 1;
-                inter += if dir2cells.contains(&(i / ratio, j / ratio)) { 1 } else { 0 };
+
+                igen = i / ratio;
+                jgen = j / ratio;
+
+                if (igen == icur && jgen == jcur) {
+                    ncur += 1;
+                } else {
+                    dir2cells.push((icur, jcur));
+                    dir2nums.push(ncur);
+                    ncur = 1;
+                    icur = igen;
+                    jcur = jgen;
+                }
             }
+
+            dir2cells.push((icur, jcur));
+            dir2nums.push(ncur);
+
+            if dir2nums.len() == 1 {
+                res[k] = -1_f64;
+                continue;
+            }
+
+            // Trace the flowlines from generalized cells
+
+            let mut inter = 0;
+            let mut total = 0;
+            let (mut istart, mut jstart): (usize, usize);
+
+            for icell in 0..dir2cells.len() {
+                flag = false;
+                
+                (istart, jstart) = dir2cells[icell];
+                i = istart;
+                j = jstart;
+
+                while !flag {
+                    // find its downslope neighbour
+                    dir = dir2[[i, j]];
+                    if dir != NODATA && dir > 0 {
+                        // move x and y accordingly
+                        i = (i as isize + di[idx[dir as usize]]) as usize;
+                        j = (j as isize + dj[idx[dir as usize]]) as usize;
+                        
+                        if i >= nrow2 || j >= ncol2 { break; } 
+
+                        if dir2cells.contains(&(i, j)) {
+                            break;
+                        }
+                    } else {
+                        flag = true;
+                    }
+                }
+
+                total += dir2nums[icell];
+                if !flag {
+                    inter += dir2nums[icell];
+                }
+            }
+
+            // let (mut ik, mut jl): (isize, isize);
+            // let (mut uik, mut ujl, mut inb, mut jnb): (usize, usize, usize, usize);
+
+            // let mut dir2nbcells: HashSet<(usize, usize)> = HashSet::new();
+
+            // for (i, j) in &dir2cells {
+            //     for nb in 0..8 {
+
+            //         ik = *i as isize + di[nb];
+            //         jl = *j as isize + dj[nb]; 
+
+            //         if ik < 0 || ik >= nrow2 as isize || jl < 0 || jl >= ncol2 as isize {
+            //             continue;
+            //         }
+
+            //         uik = ik as usize;
+            //         ujl = jl as usize;
+
+            //         if !dir2cells.contains(&(uik, ujl)) && dir2[[uik, ujl]] != NODATA {
+            //             let diridx = idx[dir2[[uik, ujl]] as usize];
+
+            //             inb = (*i as isize + di[idx[diridx]]) as usize;
+            //             jnb = (*j as isize + dj[idx[diridx]]) as usize;
+
+            //             if dir2cells.contains(&(inb, jnb)){ 
+            //                 dir2nbcells.insert((uik, ujl));
+            //             }
+            //         }
+            //     }
+            // }
+
             res[k] = inter as f64 / total as f64;
 
         }
+
         return res
     }
 

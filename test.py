@@ -16,4 +16,4 @@ dir2 = dir2_src.read(1)
 aff2 = np.array(dir2_src.get_transform())[[1, 2, 0, 4, 5, 3]]
 
 tree, seeds = fdcomp.d8tree(acc1, dir1, aff1)
-accuracy = fdcomp.d8comp(dir1, dir2, seeds[0:9])
+accuracy = fdcomp.d8comp(dir1, dir2, seeds[219:220])
